@@ -42,16 +42,18 @@ def loadPairs(path):
 
 
 class SkipGram():
-	def __init__(self, sentences, nEmbed=100, negativeRate=5, winSize = 5, minCount = 5):
-		self.valid_vocab, self.vocab_occ, self.eliminated_words = self.initialize_vocab(sentences, minCount) # list of valid words  over the whole dataset
+	def __init__(self, sentences, nEmbed=100, negativeRate=0.2, winSize = 5, winNegSize = 5, minCount = 5):
+		self.valid_vocab, self.vocab_occ, self.eliminated_words = self.initialize_vocab(sentences, minCount)
+		# set of valid words  over the whole dataset, dict of their occurences, and set of all eliminated words
 		self.w2id, self.id2w = self.word_id() # word to ID mapping
-		self.trainset = self.fiter_train_set(sentences) # set of sentences
-		self.neg_vocab, self.neg_vocab_set = self.build_neg_vocab(self.valid_vocab, self.vocab_occ, negativeRate)
-		self.neg_distrib = self.build_neg_distrib(self.neg_vocab)
+		self.trainset = self.filter_train_set(self.eliminated_words, sentences) # set of sentences
+		self.neg_vocab_set, self.n_neg = self.build_neg_vocab(self.valid_vocab, self.vocab_occ, negativeRate)
+		self.neg_distrib = self.build_neg_distrib(self.neg_vocab_set)
 		self.nEmbed = nEmbed
 		self.n_words = len(self.valid_vocab)# number of words that appear at list five times
 
-		self.winSize = winSize
+		self.winSize = winSize # Window size
+		self.winNegSize = winNegSize # Number of negative words per target vector
 
 		#Weighs of the model
 		#self.W = np.random.random((self.n_words, nEmbed))
@@ -64,31 +66,34 @@ class SkipGram():
 		vocab_occ = {word:0 for word in all_words_unique}
 		for word in all_words:
 			vocab_occ[word] += 1
-		valid_words_set = list(filter(lambda x: vocab_occ[x] > minCount, all_words_unique))
+		valid_words_set = set(filter(lambda x: vocab_occ[x] > minCount, all_words_unique))
 		invalid_words_set = all_words_unique - valid_words_set
 		return valid_words_set, vocab_occ, invalid_words_set
 
 	def word_id(self):
 		"""
-		:param setntences: set of all words in the vocab, occ > 5
+		:param setntences: set of all words in the vocab, occ > minCount
 		:return: dictionaries {word:id} and {id:word}
 		"""
-		return {word:q for q, word in enumerate(self.vocab.key())}, {q:word for q, word in enumerate(self.vocab.key())}
+		return {word:q for q, word in enumerate(self.valid_vocab)}, \
+			   {q:word for q, word in enumerate(self.valid_vocab)}
 
 	def filter_train_set(self, invalid_vocab, sentences):
 		"""
 
 		:param invalid_vocab: all words that must be extracted from the dataset
 		:param sentences: list of sentences that constitute the dataset
-		:return:
+		:return: sentences where all the invalid vocab has been deleted
 		"""
-		for q, sentence in sentences:
+		for q, sentence in enumerate(sentences):
 			to_del = []
 			for p, word in enumerate(sentence):
 				if word in invalid_vocab:
 					to_del.append(p)
 			for p in to_del[::-1]: # reverse index to be able to use del
 				del sentences[q][p]
+
+		return sentences
 
 	def build_neg_vocab(self, vocab, vocab_occ, neg_treshold):
 		"""
@@ -100,11 +105,12 @@ class SkipGram():
 		"""
 
 		n = np.sum([vocab_occ[word]  for word in vocab])
-		vocab_freq = {word:vocab_occ[word]/n for word in vocab.keys()}
-		neg_vocab = list(filter(lambda x:vocab_freq[x] < neg_treshold, vocab.keys))
+		vocab_freq = {word:vocab_occ[word]/n for word in vocab}
+		neg_vocab = list(filter(lambda x:vocab_freq[x] < neg_treshold, vocab))
 		neg_vocab_set = set(neg_vocab)
+		n_neg = len(neg_vocab)
 
-		return neg_vocab, neg_vocab_set
+		return neg_vocab_set, n_neg
 
 	def build_neg_distrib(self, neg_vocab):
 
@@ -116,7 +122,7 @@ class SkipGram():
 		:param neg_vocab: list of all the words that qualify for the negative vocabulary
 		:return: a dictionary with the frequency of each word of the negative vocabulary
 		"""
-		n = len(set(neg_vocab))
+		n = np.sum([self.vocab_occ[word]  for word in neg_vocab])
 		distr = {neg_w : self.vocab_occ[neg_w]/n for neg_w in neg_vocab}
 
 		return distr
@@ -137,18 +143,15 @@ class SkipGram():
 		"""
 		center_words = []
 		contexts = []
-		words = sentence.split(" ")
-		for k, word in words:
-			context_before = words[k-K:k]
-			context_after = words[k+1:k+1+k]
-			contexts.append( context_before + context_after)
+		for k, word in enumerate(sentence):
+			context_before = sentence[k-K:k]
+			context_after = sentence[k+1:k+1+K]
+			contexts.append(context_before + context_after)
 			center_words.append(word)
 		return center_words, contexts
 
 
-
-
-	def select_negative_sampling(self, neg_distribution):
+	def select_negative_sampling(self, neg_distribution, K):
 		"""
 
 		:param neg_vocab: set of the negative vocab
@@ -156,7 +159,12 @@ class SkipGram():
 		:return: returns K negative words
 		"""
 
-		return [np.random.choice(list(neg_distribution.keys()), p = list(neg_distribution.values()))]
+		return [np.random.choice(list(neg_distribution.keys()), p = list(neg_distribution.values())) for x in range(K)]
+
+	def oneHot(self, dim, id):
+		oh = np.zeros(dim, int)
+		oh[id] = 1
+		return oh
 
 
 	def forward(self, center_word, target_context_word, neg_words):
@@ -169,36 +177,37 @@ class SkipGram():
 		:param neg_words: list of negative words
 		:return: loss function and intermediate gradients
 		"""
-		h1 = self.W[:,self.w2id[center_word]]  	# Matrix multiplication of a
-												# One-hot encoded word extracts the n-th column of the first layer
-		h2 = h1.T @ self.W2
+		h1 = self.W[self.w2id[center_word], :]  	# output of the first layer for vcenter_word
 
-		h2_target = (self.W[:, self.w2id[target_context_word]]).T @ self.W2
+		h2 = h1.T @ self.Wp
+
+		h2_target = (self.W[self.w2id[target_context_word], :]).T @ self.Wp
 
 		h2_neg = []
 
 		for neg_word in neg_words:
-			h2_neg.append((self.W[:, self.w2id[neg_word]]).T @ self.W2)
+			h2_neg.append((self.W[self.w2id[neg_word], :]).T @ self.Wp)
 
 		loss = -np.log(expit(h2.T @ h2_target)) - np.sum([np.log(expit(-h2_n.T @ h2_target)) for h2_n in h2_neg])
 
-		grad_pred = (expit(h2.T @ h2_target) - 1) * h2 - np.sum([expit(-h2_n.T @ h2_target)*h2_n for h2_n in h2_neg])
-		#grad_W2
+		gradPred = (expit(h2.T @ h2_target) - 1) * h2 - np.sum([expit(-h2_n.T @ h2_target)*h2_n for h2_n in h2_neg])
+		#grad_Wp
 
 
 		indice_center_grad = self.w2id[center_word]
 		indices_for_grad = [self.w2id[word] for word in neg_words]
 
-		grad = np.zeros(self.W.shape)
+		grad = np.zeros(self.Wp.shape)
 
-		grad[:, indice_center_grad] += expit(h2.T @ h2_target) * h2_target
+		for n, id in enumerate(indices_for_grad):
+			gradNeg = - (expit(-h2_neg[n].T @ h2_target)-1)*h2_target
+			grad[id] = gradNeg
 
-		for q, indice in enumerate(indice_center_grad):
-			grad[:,indice] += - (expit(-h2_neg[q].T @ h2_target) - 1) * h2_target
+		grad[indice_center_grad] = (expit(h2.T @ h2_target)-1)*h2_target
 
 		#grad_W1
 
-		return loss, grad_pred, grad
+		return loss, gradPred, grad
 
 
 	def backward(self, grad_pred, grad, lr):
@@ -212,8 +221,8 @@ class SkipGram():
 
 		loss = 0 # Initialise loss at 0
 
-		self.W = np.random.random((self.n_words, self.nEmbed))
-		self.Wp = np.random.random((self.nEmbed, self.n_words))
+		self.W = np.random.normal(size = self.n_words * self.nEmbed).reshape(self.n_words, self.nEmbed)/np.sqrt(self.n_words)
+		self.Wp = np.random.normal(size = self.nEmbed * self.n_words).reshape(self.nEmbed, self.n_words)/np.sqrt(self.n_words)
 		self.accloss = 0
 		self.counter = 0
 
@@ -232,8 +241,8 @@ class SkipGram():
 
 					for context_word in contexts:
 						word = sentence_words[q] # Center word of the q-th sentence
-						neg_words = self.select_negative_sampling(self.neg_distrib)
-						if self.w2id[context_word] == self.w2id[word]: continue
+						neg_words = self.select_negative_sampling(self.neg_distrib, self.winNegSize)
+						if context_word == word: continue
 
 						loss, grad_pred, grad = self.forward(word, context_word, neg_words)
 
@@ -269,11 +278,18 @@ class SkipGram():
 		:param word2:
 		:return: a float \in [0,1] indicating the similarity (the higher the more similar)
 		"""
-		raise NotImplementedError('implement it!')
+		a, b = self.w2id(word1), self.w2id(word2)
+		e1, e2 = self.W[a,:], self.W[b,:]
+
+		return e1.T @ e2 / (np.linalg.norm(e1) * np.linalg.norm(e2))
 
 	@staticmethod
 	def load(path):
 		raise NotImplementedError('implement it!')
+
+
+
+"""
 
 if __name__ == '__main__':
 
@@ -297,3 +313,5 @@ if __name__ == '__main__':
 		for a,b,_ in pairs:
 			# make sure this does not raise any exception, even if a or b are not in sg.vocab
 			print(sg.similarity(a,b))
+
+"""
