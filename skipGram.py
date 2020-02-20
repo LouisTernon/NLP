@@ -4,7 +4,7 @@ import argparse
 import pandas as pd
 import time
 import json
-
+from tqdm import tqdm
 # useful stuff
 import numpy as np
 from scipy.special import expit
@@ -107,7 +107,7 @@ class SkipGram():
 		:return:
 		"""
 
-		n = np.sum([vocab_occ[word]  for word in vocab])
+		n = np.sum(vocab_occ[word]  for word in vocab)
 		vocab_freq = {word:vocab_occ[word]/n for word in vocab}
 		neg_vocab = list(filter(lambda x:vocab_freq[x] < neg_treshold, vocab))
 		neg_vocab_set = set(neg_vocab)
@@ -133,7 +133,7 @@ class SkipGram():
 		:param neg_vocab: list of all the words that qualify for the negative vocabulary
 		:return: a dictionary with the frequency of each word of the negative vocabulary
 		"""
-		n = np.sum([self.vocab_occ[word]  for word in neg_vocab])
+		n = np.sum(self.vocab_occ[word]  for word in neg_vocab)
 		distr = {neg_w : self.vocab_occ[neg_w]/n for neg_w in neg_vocab}
 
 		return distr
@@ -141,7 +141,7 @@ class SkipGram():
 
 	def transform_34(self, neg_vocab):
 
-		n = np.sum([self.vocab_occ[word] for word in neg_vocab])
+		n = np.sum(self.vocab_occ[word] for word in neg_vocab)
 		distr = {neg_w: (self.vocab_occ[neg_w] / n) ** 0.75 for neg_w in neg_vocab}
 		normalisationFactor = np.sum(distr.values())
 
@@ -162,8 +162,9 @@ class SkipGram():
 		center_words = []
 		contexts = []
 		for k, word in enumerate(sentence):
-			context_before = sentence[k-K:k]
-			context_after = sentence[k+1:k+1+K]
+			kp = np.random.randint(1, K+1)
+			context_before = sentence[k-kp:k]
+			context_after = sentence[k+1:k+1+kp]
 			contexts.append(context_before + context_after)
 			center_words.append(word)
 		return center_words, contexts
@@ -204,22 +205,25 @@ class SkipGram():
 		for neg_word in neg_words:
 			h2_neg.append((self.Wp[:, self.w2id[neg_word]]))
 
-		loss = -np.log(expit(hc.T @ h)) - np.sum([np.log(expit(-h2_n.T @ h)) for h2_n in h2_neg])
+		loss_pos = -np.log(expit(hc.T @ h))
+		loss_neg = - np.sum(np.log(expit(-h2_n.T @ h)) for h2_n in h2_neg)
+		loss = loss_pos + loss_neg
+
 
 		gradsWp = np.zeros(self.Wp.shape)
 
 		for q, w in enumerate(neg_words):
 			gradsWp[:, self.w2id[w]] = expit(h.T @ h2_neg[q]) * h
 
-		gradsWp[:, self.w2id[center_word]] = (expit(h.T @ hc) - 1) * h
+		gradsWp[:, self.w2id[target_context_word]] = (expit(h.T @ hc) - 1) * h
 
 
 		gradW = np.zeros(self.W.shape)
 
-		gradW[self.w2id[center_word], :] = (expit(h.T @ hc) - 1) * hc + np.sum([expit(h.T @ h2_n) * h2_n for h2_n in h2_neg])
+		gradW[self.w2id[center_word], :] = (expit(h.T @ hc) - 1) * hc + np.sum(expit(h.T @ h2_n) * h2_n for h2_n in h2_neg)
 
 
-		return loss, gradW, gradsWp
+		return loss, gradW, gradsWp, loss_pos, loss_neg
 
 	def backward(self, lr, gradW, gradsWp):
 
@@ -227,42 +231,59 @@ class SkipGram():
 		self.Wp -= lr*gradsWp
 
 
-	def train(self, epochs):
+	def train(self, epochs, lr):
 
 
-		self.W = np.random.uniform(-0.5, 0.5, size = self.n_words * self.nEmbed).reshape(self.n_words, self.nEmbed) / self.nEmbed
-		self.Wp = np.random.uniform(-0.5, 0.5, size = self.nEmbed * self.n_words).reshape(self.nEmbed, self.n_words) / self.n_words
-		self.accloss = 0
-		self.counter = 0
+		self.W = np.random.uniform(-0.5, 0.5, size = self.n_words * self.nEmbed).reshape(self.n_words, self.nEmbed)
+		self.Wp = np.random.uniform(-0.5, 0.5, size = self.nEmbed * self.n_words).reshape(self.nEmbed, self.n_words)
+
+		print("Similarity of Monday / Tuesday : {}".format(self.similarity("monday", "tuesday")))
+		print("Similarity of Monday / financial : {}".format(self.similarity("monday", "financial")))
 
 		for epoch in range(epochs):
 
-			for counter, sentence in enumerate(self.trainset):
+			print("epoch {}".format(epoch))
 
-				a = time.time()
+			self.accloss = 0
+			self.loss_pos = 0
+			self.loss_neg = 0
 
-				# Might use tqdm to show progress bar
+			self.counter =0
+
+			for counter, sentence in tqdm(enumerate(self.trainset)):
+
 
 				# sentence = filter(lambda word: word in self.vocab, sentence)
 				# Already implemented during the initialisation of the class
 
 				sentence_words, sentence_contexts = self.parse_sentence_for_context(sentence, self.winSize)
 
-				for q, contexts in enumerate(sentence_contexts):
+				for q, context in enumerate(sentence_contexts):
 
-					for context_word in contexts:
+					for context_word in context:
 						word = sentence_words[q] # Center word of the q-th sentence
-						randomWinSize = np.random.randint(1, self.winNegSize + 1)
+						randomWinSize = len(context)
 						neg_words = self.select_negative_sampling(self.neg_distrib, randomWinSize)
 						if context_word == word: continue
 
-						loss, gradW, gradsWp = self.forward(word, context_word, neg_words)
+						loss, gradW, gradsWp, loss_pos, loss_neg = self.forward(word, context_word, neg_words)
 
 						self.accloss += loss
+						self.loss_pos += loss_pos
+						self.loss_neg += loss_neg
+						self.counter += 1
 
-						self.backward(0.1, gradW, gradsWp)
-				b = time.time()
-				print("Sentence no. {} completed in {}".format(counter, b-a))
+						self.backward(lr, gradW, gradsWp)
+
+
+			if counter % 1000 == 0:
+				print("Loss : {}".format(self.accloss/self.counter))
+				print("Loss_pos : {}".format(self.loss_pos / self.counter))
+				print("Loss_neg : {}".format(self.loss_neg / self.counter))
+				print("Similarity of Monday / Tuesday : {}".format(self.similarity("monday", "tuesday")))
+				print("Similarity of Monday / financial : {}".format(self.similarity("monday", "financial")))
+
+
 
 
 
