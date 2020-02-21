@@ -1,4 +1,3 @@
-
 from __future__ import division
 import argparse
 import pandas as pd
@@ -39,11 +38,12 @@ def loadPairs(path):
 
 
 	data = pd.read_csv(path, delimiter='\t')
-	pairs = zip(data['word1'],data['word2'],data['similarity'])
+	pairs = zip(data['word1'], data['word2'], data['similarity'])
 	return pairs
 
 
 class SkipGram():
+
 	def __init__(self, sentences = 1 , nEmbed=30, negativeRate=0.0001, winSize = 5, winNegSize = 5, minCount = 30):
 		if sentences != 1:
 			self.valid_vocab, self.vocab_occ, self.eliminated_words = self.initialize_vocab(sentences, minCount)
@@ -69,7 +69,10 @@ class SkipGram():
 		vocab_occ = {word:0 for word in all_words_unique}
 		for word in all_words:
 			vocab_occ[word] += 1
-		valid_words_set = set(filter(lambda x: vocab_occ[x] > minCount, all_words_unique))
+		valid_words_set1 = set(filter(lambda x: vocab_occ[x] > minCount, all_words_unique))
+		maxCount = np.inf#np.sum(list(vocab_occ.values()))/1000
+		valid_words_set2 = set(filter(lambda x: vocab_occ[x] < maxCount, all_words_unique))
+		valid_words_set = valid_words_set1.intersection(valid_words_set2)
 		invalid_words_set = all_words_unique - valid_words_set
 		return valid_words_set, vocab_occ, invalid_words_set
 
@@ -162,9 +165,9 @@ class SkipGram():
 		center_words = []
 		contexts = []
 		for k, word in enumerate(sentence):
-			kp = np.random.randint(1, K+1)
-			context_before = sentence[k-kp:k]
-			context_after = sentence[k+1:k+1+kp]
+			#kp = np.random.randint(1, K+1) #dynamic window size
+			context_before = sentence[k-K:k]
+			context_after = sentence[k+1:k+1+K]
 			contexts.append(context_before + context_after)
 			center_words.append(word)
 		return center_words, contexts
@@ -227,15 +230,15 @@ class SkipGram():
 
 	def backward(self, lr, gradW, gradsWp):
 
-		self.W -= lr* gradW
-		self.Wp -= lr*gradsWp
+		self.W -= lr * gradW
+		self.Wp -= lr * gradsWp
 
 
 	def train(self, epochs, lr):
 
 
-		self.W = np.random.uniform(-0.5, 0.5, size = self.n_words * self.nEmbed).reshape(self.n_words, self.nEmbed)
-		self.Wp = np.random.uniform(-0.5, 0.5, size = self.nEmbed * self.n_words).reshape(self.nEmbed, self.n_words)
+		self.W = np.random.uniform(-0.3, 0.3, size=self.n_words * self.nEmbed).reshape(self.n_words, self.nEmbed)
+		self.Wp = np.random.uniform(-0.3, 0.3, size=self.nEmbed * self.n_words).reshape(self.nEmbed, self.n_words)
 
 		print("Similarity of Monday / Tuesday : {}".format(self.similarity("monday", "tuesday")))
 		print("Similarity of Monday / financial : {}".format(self.similarity("monday", "financial")))
@@ -262,9 +265,9 @@ class SkipGram():
 
 					for context_word in context:
 						word = sentence_words[q] # Center word of the q-th sentence
-						randomWinSize = len(context)
-						neg_words = self.select_negative_sampling(self.neg_distrib, randomWinSize)
-						if context_word == word: continue
+						neg_words = self.select_negative_sampling(self.neg_distrib, self.winSize)
+						if context_word == word:
+							continue
 
 						loss, gradW, gradsWp, loss_pos, loss_neg = self.forward(word, context_word, neg_words)
 
@@ -276,12 +279,12 @@ class SkipGram():
 						self.backward(lr, gradW, gradsWp)
 
 
-			if counter % 1000 == 0:
-				print("Loss : {}".format(self.accloss/self.counter))
-				print("Loss_pos : {}".format(self.loss_pos / self.counter))
-				print("Loss_neg : {}".format(self.loss_neg / self.counter))
-				print("Similarity of Monday / Tuesday : {}".format(self.similarity("monday", "tuesday")))
-				print("Similarity of Monday / financial : {}".format(self.similarity("monday", "financial")))
+				if counter % 500 == 0:
+					print("Loss : {}".format(self.accloss/self.counter))
+					print("Loss_pos : {}".format(self.loss_pos / self.counter))
+					print("Loss_neg : {}".format(self.loss_neg / self.counter))
+					print("Similarity of Monday / Tuesday : {}".format(self.similarity("monday", "tuesday")))
+					print("Similarity of Monday / financial : {}".format(self.similarity("monday", "financial")))
 
 
 
@@ -289,7 +292,6 @@ class SkipGram():
 
 	def save(self,path):
 		"""
-
 		:param self:
 		:param path: path to which the model is to be saved
 		:return: None, saves the model's weighs to path
