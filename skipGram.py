@@ -7,26 +7,52 @@ from tqdm import tqdm
 # useful stuff
 import numpy as np
 from scipy.special import expit
+import spacy
 from sklearn.preprocessing import normalize
 
 
 __authors__ = ['author1','author2','author3']
 __emails__  = ['fatherchristmoas@northpole.dk','toothfairy@blackforest.no','easterbunny@greenfield.de']
 
-def text2sentences(path):
+
+def raw_to_tokens(raw_string, spacy_nlp):
+	string = raw_string.lower().replace("$", "")
+	spacy_tokens = spacy_nlp(string)
+	string_tokens = [token.orth_ for token in spacy_tokens if not token.is_punct if not token.is_stop if
+					 not token.is_currency if not token.like_num if not token.like_url]  # if not token.is_currency]
+	return string_tokens
+
+
+def text2sentences(path, n):
 	# feel free to make a better tokenization/pre-processing
 
 	"""
 	:param path: path to the text files
 	:return: list of all sentences
 	"""
+	#TODO remove non-letter words
+
 
 
 	sentences = []
+	spacy_nlp = spacy.load('en')
+	with open(path) as f:
+		for q,l in tqdm(enumerate(f)):
+			sentences.append(raw_to_tokens(l[:-1], spacy_nlp))
+			if q == n:
+				break
+	return sentences
+
+
+
+"""	sentences = []
 	with open(path) as f:
 		for l in f:
 			sentences.append( l.lower().split() )
 	return sentences
+"""
+
+
 
 def loadPairs(path):
 
@@ -44,23 +70,31 @@ def loadPairs(path):
 
 class SkipGram():
 
-	def __init__(self, sentences = 1 , nEmbed=30, negativeRate=0.0001, winSize = 5, winNegSize = 5, minCount = 30):
-		if sentences != 1:
-			self.valid_vocab, self.vocab_occ, self.eliminated_words = self.initialize_vocab(sentences, minCount)
+	def __init__(self, sentences = 1 , nEmbed=30, negativeRate=0.0001, winSize = 5, winNegSize = 5, minCount = 30,
+				 batchSize = 256):
+
+		self.valid_vocab, self.vocab_occ, self.eliminated_words = self.initialize_vocab(sentences, minCount)
 		# set of valid words  over the whole dataset, dict of their occurences, and set of all eliminated words
-			self.w2id, self.id2w = self.word_id() # word to ID mapping
-			self.trainset = self.filter_train_set(self.eliminated_words, sentences) # set of sentences
-			self.neg_vocab_set, self.n_neg = self.build_neg_vocab(self.valid_vocab, self.vocab_occ, negativeRate)
-			self.neg_distrib = self.build_neg_distrib(self.neg_vocab_set)
-			self.nEmbed = nEmbed
-			self.n_words = len(self.valid_vocab)# number of words that appear at list five times
 
-			self.winSize = winSize # Window size
-			self.winNegSize = winNegSize # Number of negative words per target vector
+		self.w2id, self.id2w = self.word_id() # word to ID mapping
 
-		#Weighs of the model
-		#self.W = np.random.random((self.n_words, nEmbed))
-		#self.Wp = np.random.random((nEmbed, self.n_words))
+		self.sentences = self.filter_sentences(self.eliminated_words, sentences) # list of filtered sentences
+		self.trainset = self.buildTrainSet(self.sentences, winSize)
+
+
+
+
+		self.neg_vocab_set, self.n_neg = self.build_neg_vocab(self.valid_vocab, self.vocab_occ, negativeRate)
+		self.neg_distrib = self.build_neg_distrib(self.neg_vocab_set, '3/4')
+
+		self.nEmbed = nEmbed
+		self.batchSize = batchSize
+		self.n_words = len(self.valid_vocab)# number of words that appear at list five times
+		self.winSize = winSize # Window size
+		self.winNegSize = winNegSize # Number of negative words per target vector
+
+		self.W = np.random.uniform(-0.5, 0.5, size=(self.n_words, self.nEmbed)) / self.nEmbed
+		self.Wp = np.random.uniform(-0.5, 0.5, size=(self.n_words, self.nEmbed)) / self.nEmbed
 
 
 	def initialize_vocab(self, sentences, minCount):
@@ -84,7 +118,7 @@ class SkipGram():
 		return {word:q for q, word in enumerate(self.valid_vocab)}, \
 			   {q:word for q, word in enumerate(self.valid_vocab)}
 
-	def filter_train_set(self, invalid_vocab, sentences):
+	def filter_sentences(self, invalid_vocab, sentences):
 		"""
 
 		:param invalid_vocab: all words that must be extracted from the dataset
@@ -100,6 +134,36 @@ class SkipGram():
 				del sentences[q][p]
 
 		return sentences
+
+	def buildTrainSet(self, sentences, winSize, dynamic = False, shuffle = True):
+		"""
+
+		:param sentences: list of filtered sentences
+		:param winSize: context size
+		:param dynamic: if True, builds dynamic context windows
+		:param suffle: if True, all
+		:return: 2-D array. Each row is center_word, context_word. If the context has k words, then there are k rows created
+		"""
+		trainset = []
+		for sentence in sentences:
+			for k, word in enumerate(sentence):
+				if dynamic == True:
+					K = np.random.randint(1, winSize + 1)
+				else:
+					K = winSize
+				contextBefore = sentence[k - K:k]
+				contextAfter = sentence[k + 1:k + 1 + K]
+				for contextWord in (contextBefore + contextAfter):
+					if contextWord != word:
+						trainset.append((word, contextWord))
+
+		if shuffle:
+			np.random.shuffle(trainset)
+
+		return np.array(trainset)
+
+
+
 
 	def build_neg_vocab(self, vocab, vocab_occ, neg_treshold):
 		"""
@@ -118,21 +182,28 @@ class SkipGram():
 
 		return neg_vocab_set, n_neg
 
+
+
 	def build_neg_distrib(self, neg_vocab, distrib=None):
 
-		if distrib == None:
+		"""
+		:param neg_vocab: words that are eligible to be negatively sampled
+		:param distrib: type of distribution to the negative sampling
+		:return: a dictionary with the sampling frequency of each word
+		"""
+
+		if distrib == "basic":
 			return self.build_neg_distrib_basic(neg_vocab)
 
-		else:
-			return distrib(neg_vocab)
+		elif distrib == "3/4":
+			return self.transform_34(neg_vocab)
+
+
+
 
 	def build_neg_distrib_basic(self, neg_vocab):
 
 		"""
-		TODO : We might need to add a transformation to the distribution of the negative words
-		see http://mccormickml.com/2017/01/11/word2vec-tutorial-part-2-negative-sampling/ > SELECTING NEGATIVE SAMPLE
-
-
 		:param neg_vocab: list of all the words that qualify for the negative vocabulary
 		:return: a dictionary with the frequency of each word of the negative vocabulary
 		"""
@@ -144,13 +215,19 @@ class SkipGram():
 
 	def transform_34(self, neg_vocab):
 
+		"""
+		:param neg_vocab: words that are eligible to be negatively sampled
+		:return normed_distr: a dictionary with the frequency of each word of the negative vocabulary. Each word receives a ^0.75
+		transformation. Then all frequencies are normalised.
+		"""
+
 		n = np.sum(self.vocab_occ[word] for word in neg_vocab)
 		distr = {neg_w: (self.vocab_occ[neg_w] / n) ** 0.75 for neg_w in neg_vocab}
-		normalisationFactor = np.sum(distr.values())
+		sum_ = sum(list(distr.values()))
+		normed_distr = {k: v / sum_ for k, v in distr.items()}
 
-		distrNormalised = {neg_w : distr[neg_w] / normalisationFactor for neg_w in neg_vocab}
 
-		return distrNormalised
+		return normed_distr
 
 
 	def parse_sentence_for_context(self, sentence, K):
@@ -189,7 +266,10 @@ class SkipGram():
 		return oh
 
 
-	def forward(self, center_word, target_context_word, neg_words):
+	def clippedSigm(self, x):
+		return expit(np.clip(x, -6, 6)) # Clip values at 6 to avoid extreme values at the gradient
+
+	def forward(self, centerBatch, contextBatch, negativeBatch, negWinSize):
 
 		"""
 
@@ -199,34 +279,48 @@ class SkipGram():
 		:param neg_words: list of negative words
 		:return: loss function and intermediate gradients
 		"""
-		h = self.W[self.w2id[center_word], :]  	# output of the first layer for center_word
+		h = np.vstack([self.W[self.w2id[w], :] for w in centerBatch])# batch output of the first layer for center_word
 
-		hc = self.Wp[:, self.w2id[target_context_word]]
+		hc = np.vstack([self.Wp[self.w2id[w], :] for w in contextBatch])
 
-		h2_neg = []
-
-		for neg_word in neg_words:
-			h2_neg.append((self.Wp[:, self.w2id[neg_word]]))
-
-		loss_pos = -np.log(expit(hc.T @ h))
-		loss_neg = - np.sum(np.log(expit(-h2_n.T @ h)) for h2_n in h2_neg)
-		loss = loss_pos + loss_neg
-
-
-		gradsWp = np.zeros(self.Wp.shape)
-
-		for q, w in enumerate(neg_words):
-			gradsWp[:, self.w2id[w]] = expit(h.T @ h2_neg[q]) * h
-
-		gradsWp[:, self.w2id[target_context_word]] = (expit(h.T @ hc) - 1) * h
+		hNeg = np.vstack([self.Wp[self.w2id[w], :] for w in negativeBatch])
 
 
 		gradW = np.zeros(self.W.shape)
+		gradWp = np.zeros(self.Wp.shape)
+		loss = 0
+		loss_pos = 0
+		loss_neg = 0
 
-		gradW[self.w2id[center_word], :] = (expit(h.T @ hc) - 1) * hc + np.sum(expit(h.T @ h2_n) * h2_n for h2_n in h2_neg)
+		for q in range(self.batchSize):
+			centerId = self.w2id[centerBatch[q]]
+			h = self.W[centerId]
+
+			contextId = self.w2id[contextBatch[q]]
+			hc = self.Wp[contextId]
+
+			score = self.clippedSigm(h @ hc.T)
+			loss-= score
+			loss_pos -= score
+
+			gradW[centerId] += (score - 1) * hc
+			gradWp[contextId] += (score -1) * h
+
+			for k in range(negWinSize):
+				n = self.w2id[negativeBatch.pop()]# Deletes the negative batch increasingly. A new negative batch is created each epoch
+				hNeg = self.Wp[n]
+
+				score = self.clippedSigm(hNeg @ h.T)
+				loss -= score
+				loss_neg -= score
 
 
-		return loss, gradW, gradsWp, loss_pos, loss_neg
+				gradW[centerId] += score * hNeg
+				gradWp[n] += score * h
+
+
+
+		return loss, gradW, gradWp, loss_pos, loss_neg
 
 	def backward(self, lr, gradW, gradsWp):
 
@@ -234,55 +328,49 @@ class SkipGram():
 		self.Wp -= lr * gradsWp
 
 
-	def train(self, epochs, lr):
+	def train(self, epochs, lr, batchSize):
 
+		"""
 
-		self.W = np.random.uniform(-0.3, 0.3, size=self.n_words * self.nEmbed).reshape(self.n_words, self.nEmbed)
-		self.Wp = np.random.uniform(-0.3, 0.3, size=self.nEmbed * self.n_words).reshape(self.nEmbed, self.n_words)
-
-		print("Similarity of Monday / Tuesday : {}".format(self.similarity("monday", "tuesday")))
-		print("Similarity of Monday / financial : {}".format(self.similarity("monday", "financial")))
+		:param trainset: list of all (center word, context word). One context word at a time. Can be shuffled
+		:param batchSize:
+		:param lr: learning rate
+		:param epochs:
+		:param negWinSize: size of the negative sampling. 2-5 for a large dataset. 5-20 for a small dataset
+		:return:
+		"""
 
 		for epoch in range(epochs):
 
-			print("epoch {}".format(epoch))
+			print("epoch {}".format(epoch+1))
 
-			self.accloss = 0
-			self.loss_pos = 0
-			self.loss_neg = 0
+			batchIndices = list(range(0, len(self.trainset), batchSize))
 
-			self.counter =0
+			accloss = 0
+			loss_pos = 0
+			loss_neg = 0
+			counter = 0
 
-			for counter, sentence in tqdm(enumerate(self.trainset)):
+			for q, batchIndice in tqdm(enumerate(batchIndices)):
 
+				centerBatch = self.trainset[batchIndice:batchIndice + batchSize, 0]# List of center words [str]
+				contextBatch = self.trainset[batchIndice:batchIndice + batchSize, 1]# List of context words [str]
+				negativeBatch = self.select_negative_sampling(self.neg_distrib, batchSize * self.winNegSize)# List of negative words [str]
 
-				# sentence = filter(lambda word: word in self.vocab, sentence)
-				# Already implemented during the initialisation of the class
+				loss, gradW, gradsWp, lp, ln = self.forward(centerBatch, contextBatch, negativeBatch, self.winNegSize)
 
-				sentence_words, sentence_contexts = self.parse_sentence_for_context(sentence, self.winSize)
+				accloss += loss
+				loss_pos += lp
+				loss_neg += ln
+				counter += batchSize
 
-				for q, context in enumerate(sentence_contexts):
-
-					for context_word in context:
-						word = sentence_words[q] # Center word of the q-th sentence
-						neg_words = self.select_negative_sampling(self.neg_distrib, self.winSize)
-						if context_word == word:
-							continue
-
-						loss, gradW, gradsWp, loss_pos, loss_neg = self.forward(word, context_word, neg_words)
-
-						self.accloss += loss
-						self.loss_pos += loss_pos
-						self.loss_neg += loss_neg
-						self.counter += 1
-
-						self.backward(lr, gradW, gradsWp)
+				self.backward(lr, gradW, gradsWp)
 
 
-				if counter % 500 == 0:
-					print("Loss : {}".format(self.accloss/self.counter))
-					print("Loss_pos : {}".format(self.loss_pos / self.counter))
-					print("Loss_neg : {}".format(self.loss_neg / self.counter))
+				if q % 100 == 0:
+					print("Loss : {}".format(accloss/counter))
+					print("Loss_pos : {}".format(loss_pos / counter))
+					print("Loss_neg : {}".format(loss_neg / counter))
 					print("Similarity of Monday / Tuesday : {}".format(self.similarity("monday", "tuesday")))
 					print("Similarity of Monday / financial : {}".format(self.similarity("monday", "financial")))
 
