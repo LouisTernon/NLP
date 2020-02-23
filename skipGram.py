@@ -35,7 +35,7 @@ def text2sentences(path, n):
     with open(path) as f:
         for q, l in tqdm(enumerate(f)):
             sentences.append(raw_to_tokens(l[:-1], spacy_nlp))
-            if q == n:
+            if q == n-1:
                 break
     return sentences
 
@@ -62,10 +62,10 @@ def loadPairs(path):
 
 class SkipGram():
 
-    def __init__(self, sentences=1, nEmbed=30, negativeRate=0.0001, winSize=5, winNegSize=5, minCount=30,
+    def __init__(self, sentences=1, nEmbed=30, negativeRate=0.0001, winSize=5, winNegSize=5, minFreq=0, maxFreq=1,
                  batchSize=256):
 
-        self.valid_vocab, self.vocab_occ, self.eliminated_words = self.initialize_vocab(sentences, minCount)
+        self.valid_vocab, self.vocab_occ, self.eliminated_words = self.initialize_vocab(sentences, minFreq, maxFreq)
         # set of valid words  over the whole dataset, dict of their occurences, and set of all eliminated words
 
         self.w2id, self.id2w = self.word_id()  # word to ID mapping
@@ -77,7 +77,6 @@ class SkipGram():
         self.neg_distrib = self.build_neg_distrib(self.neg_vocab_set, '3/4')
 
         self.nEmbed = nEmbed
-        self.batchSize = batchSize
         self.n_words = len(self.valid_vocab)  # number of words that appear at list five times
         self.winSize = winSize  # Window size
         self.winNegSize = winNegSize  # Number of negative words per target vector
@@ -85,14 +84,14 @@ class SkipGram():
         self.W = np.random.uniform(-0.5, 0.5, size=(self.n_words, self.nEmbed)) / self.nEmbed
         self.Wp = np.random.uniform(-0.5, 0.5, size=(self.n_words, self.nEmbed)) / self.nEmbed
 
-    def initialize_vocab(self, sentences, minCount):
+    def initialize_vocab(self, sentences, minFreq, maxFreq):
         all_words = [word for sentence in sentences for word in sentence]  # list of all the words of all sentences
         all_words_unique = set(all_words)
         vocab_occ = {word: 0 for word in all_words_unique}
         for word in all_words:
             vocab_occ[word] += 1
+        minCount,  maxCount = len(all_words)*minFreq, len(all_words)*maxFreq
         valid_words_set1 = set(filter(lambda x: vocab_occ[x] > minCount, all_words_unique))
-        maxCount = np.inf  # np.sum(list(vocab_occ.values()))/1000
         valid_words_set2 = set(filter(lambda x: vocab_occ[x] < maxCount, all_words_unique))
         valid_words_set = valid_words_set1.intersection(valid_words_set2)
         invalid_words_set = all_words_unique - valid_words_set
@@ -263,7 +262,8 @@ class SkipGram():
         loss_pos = 0
         loss_neg = 0
 
-        for q in range(self.batchSize):
+        for q in range(len(contextBatch)):
+
             centerId = self.w2id[centerBatch[q]]
             h = self.W[centerId]
 
@@ -271,8 +271,8 @@ class SkipGram():
             hc = self.Wp[contextId]
 
             score = self.clippedSigm(h @ hc.T)
-            loss -= score
-            loss_pos -= score
+            loss -= np.log(score)
+            loss_pos -= np.log(score)
 
             gradW[centerId] += (score - 1) * hc
             gradWp[contextId] += (score - 1) * h
@@ -283,9 +283,11 @@ class SkipGram():
                 hNeg = self.Wp[n]
 
                 score = self.clippedSigm(hNeg @ h.T)
-                loss -= score
-                loss_neg -= score
+                loss -= np.log(self.clippedSigm(-hNeg @ h.T))
+                loss_neg -= np.log(self.clippedSigm(-hNeg @ h.T))
 
+                #gradW[centerId] += (1 - score) * hNeg
+                #gradWp[n] += (1 - score) * h
                 gradW[centerId] += score * hNeg
                 gradWp[n] += score * h
 
@@ -308,9 +310,9 @@ class SkipGram():
 		:return:
 		"""
 
-        for epoch in range(epochs):
+        start_time = time.time()
 
-            print("epoch {}".format(epoch + 1))
+        for epoch in range(epochs):
 
             batchIndices = list(range(0, len(self.trainset), batchSize))
 
@@ -319,7 +321,7 @@ class SkipGram():
             loss_neg = 0
             counter = 0
 
-            for q, batchIndice in tqdm(enumerate(batchIndices)):
+            for q, batchIndice in enumerate(batchIndices):
 
                 centerBatch = self.trainset[batchIndice:batchIndice + batchSize, 0]  # List of center words [str]
                 contextBatch = self.trainset[batchIndice:batchIndice + batchSize, 1]  # List of context words [str]
@@ -336,11 +338,15 @@ class SkipGram():
                 self.backward(lr, gradW, gradsWp)
 
                 if q % 100 == 0:
-                    print("Loss : {}".format(accloss / counter))
-                    print("Loss_pos : {}".format(loss_pos / counter))
-                    print("Loss_neg : {}".format(loss_neg / counter))
-                    print("Similarity of Monday / Tuesday : {}".format(self.similarity("monday", "tuesday")))
-                    print("Similarity of Monday / financial : {}".format(self.similarity("monday", "financial")))
+                    print("Epoch {} | Word Count :{} | Loss : {:.3f} | Pos/Neg : {:.3f}/{:.3f}".format(
+                        epoch + 1, counter, accloss / counter, loss_pos / counter, loss_neg / counter))
+
+                if q % 1000 == 0:
+                    pass
+                    # print("Similarity of Monday - Tuesday : {} / Monday - Financial : {}".format(self.similarity("monday", "tuesday"), self.similarity("monday", "financial")))
+
+            print("Epoch {} | Word Count :{} | Loss : {:.3f} | Neg/Pos : {:.3f}/{:.3f} | Eta : {:.3f}s".format(epoch+1, counter, accloss / counter, loss_pos / counter, loss_neg / counter, (epochs-(epoch+1))*((time.time()-start_time)/(epoch+1))))
+
 
     def save(self, path):
         """
@@ -381,6 +387,8 @@ class SkipGram():
         e1, e2 = self.W[a, :], self.W[b, :]
 
         return e1.T @ e2 / (np.linalg.norm(e1) * np.linalg.norm(e2))
+
+sim = lambda e1, e2: e1.T @ e2 / (np.linalg.norm(e1) * np.linalg.norm(e2))
 
 
 if __name__ == '__main__':
