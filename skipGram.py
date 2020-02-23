@@ -9,16 +9,18 @@ import numpy as np
 from scipy.special import expit
 import spacy
 from sklearn.preprocessing import normalize
+import os
+import re
 
 __authors__ = ['author1', 'author2', 'author3']
 __emails__ = ['fatherchristmoas@northpole.dk', 'toothfairy@blackforest.no', 'easterbunny@greenfield.de']
 
 
 def raw_to_tokens(raw_string, spacy_nlp):
-    string = raw_string.lower().replace("$", "")
+    string = re.sub('[^a-zA-Z ]+', "", raw_string.lower())
     spacy_tokens = spacy_nlp(string)
     string_tokens = [token.orth_ for token in spacy_tokens if not token.is_punct if not token.is_stop if
-                     not token.is_currency if not token.like_num if not token.like_url]  # if not token.is_currency]
+                     not token.is_currency if not token.like_num if not token.like_url if not token.orth_ in (' ', '')]  # if not token.is_currency]
     return string_tokens
 
 
@@ -63,11 +65,11 @@ def loadPairs(path):
 class SkipGram():
 
     def __init__(self, sentences=1, nEmbed=30, negativeRate=0.0001, winSize=5, winNegSize=5, minFreq=0, maxFreq=1,
-                 batchSize=256):
+                 batchSize=256, monitor_results=False, experience_tag=""):
 
         self.valid_vocab, self.vocab_occ, self.eliminated_words = self.initialize_vocab(sentences, minFreq, maxFreq)
         # set of valid words  over the whole dataset, dict of their occurences, and set of all eliminated words
-
+        print(f"Num words : {len(self.valid_vocab)}; eliminated : {len(self.eliminated_words)}")
         self.w2id, self.id2w = self.word_id()  # word to ID mapping
 
         self.sentences = self.filter_sentences(self.eliminated_words, sentences)  # list of filtered sentences
@@ -83,6 +85,15 @@ class SkipGram():
 
         self.W = np.random.uniform(-0.5, 0.5, size=(self.n_words, self.nEmbed)) / self.nEmbed
         self.Wp = np.random.uniform(-0.5, 0.5, size=(self.n_words, self.nEmbed)) / self.nEmbed
+
+
+        self.monitor_results = monitor_results
+        self.output_path = os.path.join("output", experience_tag)
+        if monitor_results:
+            if not os.path.exists(self.output_path ):
+                os.makedirs(self.output_path )
+            else:
+                print("{} already exists, might overwrite".format(self.output_path))
 
     def initialize_vocab(self, sentences, minFreq, maxFreq):
         all_words = [word for sentence in sentences for word in sentence]  # list of all the words of all sentences
@@ -258,9 +269,10 @@ class SkipGram():
 
         gradW = np.zeros(self.W.shape)
         gradWp = np.zeros(self.Wp.shape)
-        loss = 0
-        loss_pos = 0
-        loss_neg = 0
+        if self.monitor_results:
+            loss = 0
+            loss_pos = 0
+            loss_neg = 0
 
         for q in range(len(contextBatch)):
 
@@ -271,8 +283,9 @@ class SkipGram():
             hc = self.Wp[contextId]
 
             score = self.clippedSigm(h @ hc.T)
-            loss -= np.log(score)
-            loss_pos -= np.log(score)
+            if self.monitor_results:
+                loss -= np.log(score)
+                loss_pos -= np.log(score)
 
             gradW[centerId] += (score - 1) * hc
             gradWp[contextId] += (score - 1) * h
@@ -283,15 +296,18 @@ class SkipGram():
                 hNeg = self.Wp[n]
 
                 score = self.clippedSigm(hNeg @ h.T)
-                loss -= np.log(self.clippedSigm(-hNeg @ h.T))
-                loss_neg -= np.log(self.clippedSigm(-hNeg @ h.T))
+                if self.monitor_results:
+                    _loss = np.log(self.clippedSigm(-hNeg @ h.T)) / negWinSize
+                    loss -= _loss
+                    loss_neg -= _loss
 
-                #gradW[centerId] += (1 - score) * hNeg
-                #gradWp[n] += (1 - score) * h
-                gradW[centerId] += score * hNeg
-                gradWp[n] += score * h
+                gradW[centerId] += score * hNeg / negWinSize
+                gradWp[n] += score * h / negWinSize
 
-        return loss, gradW, gradWp, loss_pos, loss_neg
+        if self.monitor_results:
+            return loss, gradW, gradWp, loss_pos, loss_neg
+        else:
+            return 0, gradW, gradWp, 0, 0
 
     def backward(self, lr, gradW, gradsWp):
 
@@ -311,6 +327,9 @@ class SkipGram():
 		"""
 
         start_time = time.time()
+        self.loss_history = []
+        self.posloss_history = []
+        self.negloss_history = []
 
         for epoch in range(epochs):
 
@@ -330,23 +349,31 @@ class SkipGram():
 
                 loss, gradW, gradsWp, lp, ln = self.forward(centerBatch, contextBatch, negativeBatch, self.winNegSize)
 
-                accloss += loss
-                loss_pos += lp
-                loss_neg += ln
-                counter += batchSize
+                if self.monitor_results:
+                    accloss += loss
+                    loss_pos += lp
+                    loss_neg += ln
+                    counter += batchSize
 
                 self.backward(lr, gradW, gradsWp)
 
-                if q % 100 == 0:
+                if self.monitor_results and q % 100 == 0:
                     print("Epoch {} | Word Count :{} | Loss : {:.3f} | Pos/Neg : {:.3f}/{:.3f}".format(
                         epoch + 1, counter, accloss / counter, loss_pos / counter, loss_neg / counter))
 
-                if q % 1000 == 0:
+                if self.monitor_results and q % 1000 == 0:
                     pass
                     # print("Similarity of Monday - Tuesday : {} / Monday - Financial : {}".format(self.similarity("monday", "tuesday"), self.similarity("monday", "financial")))
 
-            print("Epoch {} | Word Count :{} | Loss : {:.3f} | Neg/Pos : {:.3f}/{:.3f} | Eta : {:.3f}s".format(epoch+1, counter, accloss / counter, loss_pos / counter, loss_neg / counter, (epochs-(epoch+1))*((time.time()-start_time)/(epoch+1))))
-
+            if self.monitor_results:
+                print("Epoch {} | Word Count :{} | Loss : {:.3f} | Neg/Pos : {:.3f}/{:.3f} | Eta : {:.3f}s".format(epoch+1, counter, accloss / counter, loss_pos / counter, loss_neg / counter, (epochs-(epoch+1))*((time.time()-start_time)/(epoch+1))))
+                self.loss_history.append(accloss / counter)
+                self.posloss_history.append(loss_pos / counter)
+                self.negloss_history.append(loss_neg / counter)
+                self.save(os.path.join(self.output_path, "model_epoch_{}".format(epoch)))
+                np.save(os.path.join(self.output_path, "loss.npy"), np.array(self.loss_history))
+                np.save(os.path.join(self.output_path, "posloss.npy"), np.array(self.posloss_history))
+                np.save(os.path.join(self.output_path, "negloss.npy"), np.array(self.negloss_history))
 
     def save(self, path):
         """
@@ -387,9 +414,6 @@ class SkipGram():
         e1, e2 = self.W[a, :], self.W[b, :]
 
         return e1.T @ e2 / (np.linalg.norm(e1) * np.linalg.norm(e2))
-
-sim = lambda e1, e2: e1.T @ e2 / (np.linalg.norm(e1) * np.linalg.norm(e2))
-
 
 if __name__ == '__main__':
 
