@@ -11,46 +11,43 @@ python skipGram.py --text <relative_path_to_EN-SIMLEX-999.txt> --model <model.mo
 ```
 
 ## Default parameters
+We identified various combinations of parameters based on the size of the corpus.
+
 The default parameters vary depending on the length of the dataset : 
-For 1000 lines or less:
-- Embedding dimension = 50
-- Negative rate = 1e-2  // maximal frequency for a word to qualify to be negatively sampled
-- Context Size = 5
-- Minimum Count = 0
-- Negative Size = 5 // number of negatively sampled words per context word
-- maxFreq = 1
-- Epochs = 100
-- Batch Size = 16
-- Learning Rate = 0.05
+- For 1000 lines or less:
+    - Embedding dimension = 50
+    - Negative rate = 1e-2  // maximal frequency for a word to qualify to be negatively sampled
+    - Context Size = 5
+    - Minimum Count = 0
+    - Negative Size = 5 // number of negatively sampled words per context word
+    - maxFreq = 1
+    - Epochs = 100
+    - Batch Size = 16
+    - Learning Rate = 0.05
 
-For 1001 to 100,000 lines: 
-- Embedding dimension = 150
-- Negative rate = 1e-3  // maximal frequency for a word to qualify to be negatively sampled
-- Context Size = 5
-- Minimum Count = 5
-- Negative Size = 5 // number of negatively sampled words per context word
-- maxFreq = 1
-- Epochs = 150
-- Batch Size = 128
-- Learning Rate = 0.05
+- For 1001 to 100,000 lines: 
+    - Embedding dimension = 150
+    - Negative rate = 1e-3  // maximal frequency for a word to qualify to be negatively sampled
+    - Context Size = 5
+    - Minimum Count = 5
+    - Negative Size = 5 // number of negatively sampled words per context word
+    - maxFreq = 1
+    - Epochs = 150
+    - Batch Size = 128
+    - Learning Rate = 0.05
 
-For more than 100,000 lines: 
-- Embedding dimension = 300
-- Negative rate = 1e-4  // maximal frequency for a word to qualify to be negatively sampled
-- Context Size = 5
-- Minimum Count = 5
-- Negative Size = 2 // number of negatively sampled words per context word
-- maxFreq = 1
-- Epochs = 200
-- Batch Size = 256
-- Learning Rate = 0.025
+- For more than 100,000 lines: 
+    - Embedding dimension = 300
+    - Negative rate = 1e-4  // maximal frequency for a word to qualify to be negatively sampled
+    - Context Size = 5
+    - Minimum Count = 5
+    - Negative Size = 2 // number of negatively sampled words per context word
+    - maxFreq = 1
+    - Epochs = 200
+    - Batch Size = 256
+    - Learning Rate = 0.025
 
 
-## Model Architecture 
-The word embedings derive from the skip-gram model whose objective is to predict a word's context. To train the model, we must predict the context of each word of the training set. It is like a sliding window on every word of the sentences. 
-The back propagation of such model is very costly and requires to make computations for each possible word. The loss function needs to be penalised with all the words that are not in the context. Hence the negative sampling, a method that enables penalisation of the skip gram with random words. We do the hypothesis that random word are related nor to the center word, nor to the context word. This allow to only compute a few words (~10), compared with (~1e3 - 1e6) with the basic skip gram. 
+## Though process
 
-## Modifications and choices 
-We had a hard time getting the model to converge. At the beggining, we only had one epoch (like in Mikolov's code in C). This led to having all the word embeddings colinear (similarity returned .99). However, by doing several epochs, we were able to lower the loss. We noted that the loss decreased after less epochs for bigger models. Mikolov used a much bigger corpus than us. It might be the reason why he only did one epoch. 
-In parralel, we introduced batch sizes and shuffled the train set to have a more stable convergence. We don't think we need to explain the batch size. Regarding the shuffling however, here is how we did it : We generated pairs of (center word, context word). One context word at a time for each center word. The pairs were then shuffled. The negatively word were all sampled at the same time to improve computation time. If the context word or the center word were the same as a negative sample, they were not calculated. Last, in order to stablise the convergence, we clipped the gradients to avoid overflow. 
-In order to improve computation time, we gave the model's W and W' forward matrices the same dimension (W.T should have the same shape as W'). So, we only needed to access the rows of W and W', instead of their columns. 
+Our though process can be found in the report attached, especially in the fifth section, challenges. In summary, we first implemented a vanilla skip-gram, taking inspiration from [X. Rong](https://arxiv.org/abs/1411.2738, 201) and [Y. Goldberg](https://arxiv.org/abs/1402.3722), have further information about the optimization process, how to perform the updates of the embeddings, and gain a finer understanding of negative sampling particularities. Our first models gave poor performances, and especially a recurrent behavior was the very rapid convergence of all embedding to a unique value. At the time, we were running experiments on very small corpuses, to get faster insight. It was difficult to undestands what caused the model to behave that way. Going deeper in the litterature, we mostly identified two potential issues: the first being the quality of the data (since we used small corpuses, the information is very noizy, negative sampling distribution not meaningfull, ..), so we tried multiple strategies to enhance the quality of the data (Lossy counting, subsampling high frequency, ..), and used bigger corpuses. The second source was the model itself, since we believed skipgram negative sampling wasn't powerfull enough, leading to all embedding being similar. The rate of experiments was very slow due to the important training time of the models, and it did not solve the issue. We eventually realized that, using our settings, negative sampling was actually too powerful, causing the positive loss to increase and converging to this wrong solution. We managed to fix this issue by averaging the loss of negative sampling for each context words, allowing us to have models converging to actual optimal solutions. However, the embeddings are not yet significant, since we were not able to train the model on important corpuses (>10k sentences). 
